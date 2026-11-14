@@ -1,0 +1,5 @@
+Upstream repository: https://github.com/Konqi0139/Keshiki
+Upstream main SHA: 45a1e7e8793e97c0bd79f3953e9bda454ddae329
+Platform: Linux; exact baseline/working Bash script in private HOME
+YAD: stub returns the selected ordinary wallpaper row
+Filesystem effects: restricted to the temporary test HOME
