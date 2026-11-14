@@ -1,0 +1,8 @@
+Upstream repository: https://github.com/Konqi0139/Keshiki
+Upstream main SHA: 45a1e7e8793e97c0bd79f3953e9bda454ddae329
+Working checkout: Azytar/Keshiki fork, main at the same SHA
+Working tree before audit: clean
+Platform: Linux; Bash launcher; stubs for xwinwrap, keshiki-cli, and pidof
+Not installed: ShellCheck; shfmt
+Test target: copied upstream keshiki-start in a private workspace directory
+Real video playback: not exercised
