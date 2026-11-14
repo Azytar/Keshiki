@@ -1,0 +1,1 @@
+FAIL: desktop paths differ from INSTALL_DIR (Exec=/opt/Keshiki/keshiki.bash, Icon=/opt/Keshiki/keshiki.png, install=/opt/keshiki)

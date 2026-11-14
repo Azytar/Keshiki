@@ -83,8 +83,8 @@ cat <<EOF > "$DESKTOP_FILE"
 Version=1.3
 Name=Keshiki
 Comment=Gestor de Live Wallpapers para compositores basados en X11
-Exec=/opt/Keshiki/keshiki.bash
-Icon=/opt/Keshiki/keshiki.png
+Exec=${INSTALL_DIR}/keshiki.bash
+Icon=${INSTALL_DIR}/keshiki.png
 Type=Application
 Categories=AudioVideo;Video;GTK;Utility;
 Terminal=false
