@@ -8,6 +8,28 @@ export HERE="$(dirname "$(readlink -f "${0}")")" list_wall="/tmp/keshiki_list_wa
 export DIRCONFIG="$HOME/.config/keshiki/" socketfile="/tmp/mpv_socket_${USER}" 
 export CONFIG="${DIRCONFIG}keshiki.cfg" script=${0##*/}
 
+desktop_string_unescape(){
+    local input="$1" output="" char next i
+    for ((i = 0; i < ${#input}; i++)); do
+        char=${input:i:1}
+        if [[ $char == \\ ]] && ((i + 1 < ${#input})); then
+            ((i += 1))
+            next=${input:i:1}
+            case "$next" in
+                \\) output+='\' ;;
+                n) output+=$'\n' ;;
+                t) output+=$'\t' ;;
+                r) output+=$'\r' ;;
+                s) output+=' ' ;;
+                *) output+="\\$next" ;;
+            esac
+        else
+            output+="$char"
+        fi
+    done
+    DESKTOP_VALUE=$output
+}
+
 
 [ -f "${CONFIG}" ] && source "${CONFIG}"
 
@@ -70,38 +92,41 @@ list_wallpaper(){
     fi
     
     echo -e "${Lang[0]}\n"
-    local list="/tmp/keshiki_tmp_list"
     local x=1
     
-    rm -f "$list" "$list_wall"
+    rm -f "$list_wall"
     cd "${DIRCONFIG}" 2>/dev/null || exit
+    : > "$list_wall"
 
     for desk in desktops/*.desktop; do
         [ -e "$desk" ] || continue
-        local name="" exec_path=""
+        local name="" exec_path="" source_path=""
         while IFS='=' read -r key value; do
             if [[ "$key" == "Name" ]]; then
                 name="$value"
+            elif [[ "$key" == "X-Keshiki-Source" ]]; then
+                desktop_string_unescape "$value"
+                source_path=$DESKTOP_VALUE
             elif [[ "$key" == "Exec" ]]; then
                 exec_path=$(sed "s|${HERE}/keshiki-start '||;s|'||" <<<"$value")
             fi
         done < "$desk"
-        echo "${name}|${exec_path}" >> "$list"
-    done
-
-    [ ! -f "$list" ] && echo -e "${BRed}No hay wallpapers añadidos aún.${CReset}\n" && return
-
-    while IFS='|' read -r d1 d2; do 
-        echo -e "   ${x}\t${d1}|${d2}" >> "$list_wall"
-        if [ -f "$d2" ]; then 
-            echo -e "$BPurple   ${x}\t${BCyan}$(cut -c 1-100 <<<"${d1}") ${BGreen}${Lang[1]}$CReset"
+        [[ -n $source_path ]] && exec_path=$source_path
+        printf '%s\0%s\0' "$x" "$exec_path" >> "$list_wall"
+        if [ -f "$exec_path" ]; then
+            printf '%b   %s\t%b%s %b%s%b\n' "$BPurple" "$x" "$BCyan" \
+                "${name:0:100}" "$BGreen" "${Lang[1]}" "$CReset"
         else
-            echo -e "$BPurple   ${x}\t${BCyan}$(cut -c 1-100 <<<"${d1}") ${BRed}${Lang[2]}$CReset"
+            printf '%b   %s\t%b%s %b%s%b\n' "$BPurple" "$x" "$BCyan" \
+                "${name:0:100}" "$BRed" "${Lang[2]}" "$CReset"
         fi
         ((x++))
-    done < "$list"
-    
-    rm -f "$list"
+    done
+
+    if ((x == 1)); then
+        rm -f "$list_wall"
+        echo -e "${BRed}No hay wallpapers añadidos aún.${CReset}\n"
+    fi
 }
 
 finish(){
@@ -115,8 +140,13 @@ start(){
         exit 1
     fi
     echo -e "Iniciando...\n"
-    local target_cmd
-    target_cmd=$(grep "   ${1}	" "$list_wall" | cut -f2 -d"|")
+    local index path target_cmd=""
+    while IFS= read -r -d '' index && IFS= read -r -d '' path; do
+        if [[ $index == "$1" ]]; then
+            target_cmd=$path
+            break
+        fi
+    done < "$list_wall"
     if [ -n "$target_cmd" ]; then
         "${HERE}/keshiki-start" "$target_cmd"
     else

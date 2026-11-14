@@ -75,6 +75,7 @@ variables(){
 desktop(){ 
     if [ "$is_url" = "TRUE" ]; then
         NAME=$(sed "s/[=,.]//g;s/ /_/g;s/[^A-Za-z0-9_]//g" <<<"${file_name}")
+        resolve_entry_name
         DIR="${DIRCONFIG}resources/${NAME}"
         mkdir -p "${DIR}"
 
@@ -90,6 +91,7 @@ desktop(){
         full_name="${file##*/}" 
         file_name="${full_name%$format}"
         NAME=$(sed "s/[=,.]//g;s/ /_/g" <<<"${file_name}")
+        resolve_entry_name
         DIR="${DIRCONFIG}resources/${NAME}"
         mkdir -p "${DIR}"
         
@@ -113,17 +115,102 @@ desktop(){
         comment_text="${full_name} | ${duration} | ${resolution_fps}"
     fi
 
+    local exec_line
+    exec_line=$(desktop_exec_line)
+    local source_value
+    source_value=$(desktop_string_escape "$file")
+
     cat <<EOF > "${DIRCONFIG}desktops/${NAME}.desktop"
 [Desktop Entry]
 Name=${file_name}
 GenericName=
 Comment=${comment_text}
-Exec=${HERE}/keshiki-start '${file}'
+${exec_line}
+X-Keshiki-Source=${source_value}
 Icon=${DIR}/image.jpg
 Type=Application
 EOF
     
     rm -f "/tmp/frame${num}.jpg" "/tmp/yt_frame${num}"*
+}
+
+desktop_exec_arg(){
+    local input="$1" output="" char i
+    for ((i = 0; i < ${#input}; i++)); do
+        char=${input:i:1}
+        case "$char" in
+            \\) output+='\\\\' ;;
+            '"') output+='\\"' ;;
+            '`') output+='\\`' ;;
+            '$') output+='\\$' ;;
+            '%') output+='%%' ;;
+            *) output+="$char" ;;
+        esac
+    done
+    printf '"%s"' "$output"
+}
+
+desktop_exec_line(){
+    printf 'Exec=%s %s' \
+        "$(desktop_exec_arg "${HERE}/keshiki-start")" \
+        "$(desktop_exec_arg "$file")"
+}
+
+desktop_string_escape(){
+    local input="$1" output="" char i
+    for ((i = 0; i < ${#input}; i++)); do
+        char=${input:i:1}
+        case "$char" in
+            \\) output+='\\' ;;
+            $'\n') output+='\n' ;;
+            $'\t') output+='\t' ;;
+            $'\r') output+='\r' ;;
+            *) output+="$char" ;;
+        esac
+    done
+    printf '%s' "$output"
+}
+
+resolve_entry_name(){
+    local desktop_path="${DIRCONFIG}desktops/${NAME}.desktop"
+    local wanted_source existing_source existing_exec legacy_exec
+    local base_name checksum length suffix=0 candidate
+    [[ -e $desktop_path ]] || return 0
+
+    wanted_source="X-Keshiki-Source=$(desktop_string_escape "$file")"
+    existing_source=$(sed -n '/^X-Keshiki-Source=/p' "$desktop_path")
+    [[ $existing_source == "$wanted_source" ]] && return 0
+    if [[ -z $existing_source ]]; then
+        existing_exec=$(sed -n '/^Exec=/p' "$desktop_path")
+        legacy_exec="Exec=${HERE}/keshiki-start '${file}'"
+        [[ $existing_exec == "$legacy_exec" ]] && return 0
+    fi
+
+    base_name=$NAME
+    read -r checksum length < <(printf '%s' "$file" | cksum)
+    while :; do
+        candidate="${base_name}_${checksum}_${length}"
+        ((suffix > 0)) && candidate+="_${suffix}"
+        desktop_path="${DIRCONFIG}desktops/${candidate}.desktop"
+        if [[ ! -e $desktop_path ]]; then
+            NAME=$candidate
+            return 0
+        fi
+        existing_source=$(sed -n '/^X-Keshiki-Source=/p' "$desktop_path")
+        if [[ $existing_source == "$wanted_source" ]]; then
+            NAME=$candidate
+            return 0
+        fi
+        if [[ -z $existing_source ]]; then
+            existing_exec=$(sed -n '/^Exec=/p' "$desktop_path")
+            legacy_exec="Exec=${HERE}/keshiki-start '${file}'"
+            if [[ $existing_exec == "$legacy_exec" ]]; then
+                NAME=$candidate
+                return 0
+            fi
+        fi
+        ((suffix += 1))
+    done
 }
 
 if [ -d "$file" ] && [ "$is_url" != "TRUE" ]; then 

@@ -1,0 +1,6 @@
+Upstream repository: https://github.com/Konqi0139/Keshiki
+Upstream main SHA: 45a1e7e8793e97c0bd79f3953e9bda454ddae329
+Tools: Bash, desktop-file-validate, gtk-launch
+Execution target: generated desktop entries, temporary HOME, capture stubs
+Video decoding: not exercised; placeholder files only
+Display/GPU: not exercised
