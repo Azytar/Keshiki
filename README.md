@@ -2,6 +2,8 @@
 
 <p align="center">un gestor de fondos de pantalla animados liviano para Linux escrito en Bash.</p>
 
+<p align="center">Version<b> 1.1.5 <b></p>
+
 # Keshiki ー景色ー
 
 Si te gusta mi proyecto, ¡por favor no olvides hacer clic en el botón de estrella! 🌟 ¡Tu apoyo es muy valioso!
@@ -64,6 +66,22 @@ sudo ./install.sh
 | `imagemagick` | Tratamiento y redimensión de miniaturas | Requerido |
 
 ---
+### Instalación rápida de `xwinwrap` (Si no está en tus repositorios)
+
+Si usás **Arch Linux** o derivados, podés instalarlo directo desde el AUR:
+```bash
+yay -S xwinwrap-mmhobi7-git
+```
+
+Para **Debian / Ubuntu / Linux Mint** (compilación desde el fork recomendado):
+```bash
+sudo apt install git build-essential libx11-dev libxext-dev libxrender-dev
+git clone https://github.com
+cd xwinwrap && make && sudo make install
+```
+
+> **💡 Nota para soporte de YouTube:** Para agregar enlaces o directos de YouTube, asegurate de tener instalado `yt-dlp` junto con un motor de JavaScript ligero como: `deno`, `quickjs` o `nodejs`.
+
 ### Desinstalación 🗑️
 
 Si deseas desinstalar Keshiki por completo de tu sistema, simplemente ejecuta el mismo instalador con el parámetro `--remove`:
