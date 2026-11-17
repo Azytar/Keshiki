@@ -4,55 +4,52 @@
 # Eres libre de modificarlo a tu gusto, solo te pido
 # nombrarme como autor del script
 
-export HERE="$(dirname "$(readlink -f "${0}")")" DIRCONFIG="$HOME/.config/keshiki/" running=${0##*/} PATH="${HERE}/bin:${PATH}" 
+HERE="$(dirname "$(readlink -f "${0}")")"
+export HERE DIRCONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/keshiki/" running=${0##*/} PATH="${HERE}/bin:${PATH}"
 export CONFIG="${DIRCONFIG}keshiki.cfg" ICON="${HERE}/keshiki.png"
 
-pidof yadsystray >/dev/null && exit 0
+# shellcheck source=keshiki-session
+source "$HERE/keshiki-session"
+keshiki_register_component tray keshiki-systray || exit 0
+cleanup_tray() {
+    if [ -n "${tray_pid:-}" ] && [ -n "${tray_start:-}" ] &&
+        [ "$(keshiki_start_time "$tray_pid")" = "$tray_start" ]; then
+        kill -TERM "$tray_pid" 2>/dev/null || :
+        wait "$tray_pid" 2>/dev/null || :
+    fi
+    keshiki_clear_own_component tray || :
+}
+trap cleanup_tray EXIT
+trap 'exit 0' INT TERM HUP
 
-if [[ $LANG == es* ]]; then 
+if [[ $LANG == es* ]]; then
     Lan=(
-        "Acerca de" 
-        "Cerrar Keshiki" 
-        "Salir" 
-        "Finalizar el Wallpaper" 
-        "Iniciar último seleccionado" 
+        "Acerca de"
+        "Cerrar Keshiki"
+        "Salir"
+        "Finalizar el Wallpaper"
+        "Iniciar último seleccionado"
         "Pausar/Reproducir"
     )
-else 
+else
     Lan=(
-        "About" 
-        "Close Keshiki" 
-        "Exit" 
-        "Wallpaper Finish" 
-        "Start last selected" 
+        "About"
+        "Close Keshiki"
+        "Exit"
+        "Wallpaper Finish"
+        "Start last selected"
         "Play/Pause"
     )
 fi
 
-Exit(){ 
-    killall -q yadsystray
-    exit 0
-}
-export -f Exit
-
-toggle_keshiki(){ 
-    if pidof keshiki >/dev/null; then 
-        killall -q keshiki
-    else 
-        "${HERE}/keshiki.bash" &
-    fi
-}
-export -f toggle_keshiki
-
-play_pause(){ 
-    echo '{ "command": ["cycle", "pause"] }' | socat - "/tmp/mpv_socket_${USER}" >/dev/null 2>&1
-}
-export -f play_pause
-
-yadsystray --notification --image="$ICON" --text="Keshiki" --command="bash -c toggle_keshiki" \
---menu="${Lan[0]}!${HERE}/keshiki-about!gtk-info|\
-${Lan[1]}!bash -c 'killall -q keshiki; Exit'!gtk-close|\
-${Lan[3]}!${HERE}/keshiki-cli -f|\
-${Lan[4]}!${HERE}/keshiki-cli -r|\
-${Lan[5]}!bash -c play_pause|\
-${Lan[2]}!bash -c '${HERE}/keshiki-cli -f; killall -q keshiki; Exit'!exit"
+yadsystray --notification --image="$ICON" --text="Keshiki" \
+    --command="bash -c '\"\$HERE/keshiki-cli\" --toggle-gui'" \
+    --menu="${Lan[0]}!bash -c '\"\$HERE/keshiki-about\"'!gtk-info|\
+${Lan[1]}!bash -c '\"\$HERE/keshiki-cli\" --close-gui'!gtk-close|\
+${Lan[3]}!bash -c '\"\$HERE/keshiki-cli\" -f'|\
+${Lan[4]}!bash -c '\"\$HERE/keshiki-cli\" -r'|\
+${Lan[5]}!bash -c '\"\$HERE/keshiki-cli\" --pause'|\
+${Lan[2]}!bash -c '\"\$HERE/keshiki-cli\" -f; \"\$HERE/keshiki-cli\" --close-gui; \"\$HERE/keshiki-cli\" --close-tray'!exit" &
+tray_pid=$!
+tray_start=$(keshiki_start_time "$tray_pid") || tray_start=
+wait "$tray_pid" 2>/dev/null

@@ -3,31 +3,49 @@
 #
 # Eres libre de modificarlo a tu gusto, solo te pido
 # nombrarme como autor del script
+Color=${Color:-"color='#31E6F0'"}
 
-if [[ $LANG = es* ]]; then 
+if [[ $LANG = es* ]]; then
     Lan=("Arte de Icono por" "Créditos" "Cerrar" "Creado por" "Acerca de Keshiki")
-else 
+else
     Lan=("Icon Art by" "Credits" "Close" "Created by" "About Keshiki")
 fi
 
 export tab1="${Lan[0]}" title="${Lan[1]}" tab2="${Lan[3]}" id="$RANDOM" close="${Lan[2]}" ver="1.1.3"
 
-credits(){ 
+# shellcheck disable=SC2329
+credits() {
+    # shellcheck source=keshiki-session
+    source "$HERE/keshiki-session"
+    local tab1_start='' tab2_start=''
     keshiki --plug=$id --tabnum=1 --text-align=center --selectable-labels --text="\nS.Konqi0139" &
     TAB1_PID=$!
+    tab1_start=$(keshiki_start_time "$TAB1_PID") || :
     keshiki --plug=$id --tabnum=2 --text-align=center --selectable-labels --text="\nMonstercat Guy Ü" &
     TAB2_PID=$!
+    tab2_start=$(keshiki_start_time "$TAB2_PID") || :
 
-    Exit(){ kill -USR1 $YAD_PID; }; export -f Exit
+    cleanup_tabs() {
+        if [ -n "$tab1_start" ] && [ "$(keshiki_start_time "$TAB1_PID")" = "$tab1_start" ]; then
+            kill -TERM "$TAB1_PID" 2>/dev/null || :
+        fi
+        if [ -n "$tab2_start" ] && [ "$(keshiki_start_time "$TAB2_PID")" = "$tab2_start" ]; then
+            kill -TERM "$TAB2_PID" 2>/dev/null || :
+        fi
+        wait "$TAB1_PID" "$TAB2_PID" 2>/dev/null || :
+    }
+    trap 'cleanup_tabs; exit 1' INT TERM HUP
 
     keshiki --notebook --window-icon="$ICON" --center --key=$id --tab="$tab2:" --tab="$tab1:" --width=339 --height=239 \
-    --title="$title" --button="$close:bash -c 'kill $TAB1_PID $TAB2_PID; Exit'"
-} 
+        --title="$title" --button="$close:0"
+    cleanup_tabs
+    trap - INT TERM HUP
+}
 export -f credits
 
 keshiki --form --window-icon="$ICON" --image-on-top --image="${HERE}/about-keshiki.png" --title="${Lan[4]}" \
---align=center --borders=5 --selectable-labels --field="<span></span>":LBL --center \
---field="<span $Color><b><big>Keshiki</big></b></span>":LBL --field="$ver":LBL \
---field="Keshiki es un gestor de fondos de pantalla animados.":LBL \
---field="Licencia GNU GPLv3":LBL \
---button="$title:bash -c credits" --button="$close":1 --buttons-layout=edge
+    --align=center --borders=5 --selectable-labels --field="<span></span>":LBL --center \
+    --field="<span $Color><b><big>Keshiki</big></b></span>":LBL --field="$ver":LBL \
+    --field="Keshiki es un gestor de fondos de pantalla animados.":LBL \
+    --field="Licencia GNU GPLv3":LBL \
+    --button="$title:bash -c credits" --button="$close":1 --buttons-layout=edge

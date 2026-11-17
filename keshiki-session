@@ -1,0 +1,283 @@
+#!/bin/bash
+# Shared session state. The private runtime directory is the trust boundary.
+
+keshiki_runtime() {
+    local base uid mode key
+    uid=$(id -u) || return 1
+    base=${XDG_RUNTIME_DIR:-}
+    if [[ $base = /* ]] && [ -d "$base" ] && [ ! -L "$base" ] &&
+        [ "$(stat -c %u -- "$base")" = "$uid" ]; then
+        mode=$(stat -c %a -- "$base") || return 1
+        if (((8#$mode & 077) != 0)); then
+            base=
+        fi
+    else
+        base=
+    fi
+    # Leave room for the per-instance name and socket within sockaddr_un.
+    if [ -n "$base" ] && ((${#base} > 40)); then
+        base=
+    fi
+    if [ -z "$base" ]; then
+        base="${TMPDIR:-/tmp}/keshiki-$uid"
+        if [[ $base != /* ]] || ((${#base} > 40)); then base="/tmp/keshiki-$uid"; fi
+        (
+            umask 077
+            mkdir -- "$base" 2>/dev/null
+        ) || :
+        [ -d "$base" ] && [ ! -L "$base" ] &&
+            [ "$(stat -c %u -- "$base")" = "$uid" ] || return 1
+        mode=$(stat -c %a -- "$base") || return 1
+        (((8#$mode & 077) == 0)) || return 1
+    fi
+    # Each X display and installation has its own control state.
+    read -r key _ < <(printf '%s\0%s' "${DISPLAY:-}" "$HERE" | sha256sum)
+    key=${key:0:24}
+    KESHIKI_RUNTIME="$base/keshiki-$key"
+    (
+        umask 077
+        mkdir -- "$KESHIKI_RUNTIME" 2>/dev/null
+    ) || :
+    [ -d "$KESHIKI_RUNTIME" ] && [ ! -L "$KESHIKI_RUNTIME" ] &&
+        [ "$(stat -c %u -- "$KESHIKI_RUNTIME")" = "$uid" ] || return 1
+    mode=$(stat -c %a -- "$KESHIKI_RUNTIME") || return 1
+    (((8#$mode & 077) == 0)) || return 1
+}
+
+keshiki_lock() {
+    keshiki_runtime || {
+        echo 'Invalid Keshiki runtime directory' >&2
+        return 1
+    }
+    [ ! -L "$KESHIKI_RUNTIME/lock" ] || return 1
+    exec {KESHIKI_LOCK}>"$KESHIKI_RUNTIME/lock" || return 1
+    flock -x "$KESHIKI_LOCK"
+}
+
+keshiki_unlock() {
+    flock -u "$KESHIKI_LOCK"
+    exec {KESHIKI_LOCK}>&-
+}
+
+# Linux start time distinguishes a live process from a reused PID.
+keshiki_start_time() {
+    local stat rest
+    IFS= read -r stat 2>/dev/null <"/proc/$1/stat" || return 1
+    rest=${stat##*) }
+    local -a fields
+    read -r -a fields <<<"$rest"
+    [[ ${fields[19]:-} =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "${fields[19]}"
+}
+
+keshiki_group_matches() {
+    local pid=$1 start=$2 stat rest
+    [ "$(keshiki_start_time "$pid")" = "$start" ] || return 1
+    IFS= read -r stat 2>/dev/null <"/proc/$pid/stat" || return 1
+    rest=${stat##*) }
+    local -a fields
+    read -r -a fields <<<"$rest"
+    [ "${fields[2]:-}" = "$pid" ] && [ "${fields[3]:-}" = "$pid" ]
+}
+
+keshiki_process_matches() {
+    local pid=$1 start=$2 expected=$3 arg found=0
+    [[ $pid =~ ^[1-9][0-9]*$ && $start =~ ^[0-9]+$ ]] || return 1
+    [ "$(stat -c %u "/proc/$pid" 2>/dev/null)" = "$(id -u)" ] || return 1
+    [ "$(keshiki_start_time "$pid")" = "$start" ] || return 1
+    [ -r "/proc/$pid/cmdline" ] || return 1
+    while IFS= read -r -d '' arg; do
+        [ "$arg" = "$expected" ] && found=1
+    done <"/proc/$pid/cmdline"
+    [ "$found" -eq 1 ]
+}
+
+keshiki_read_session() {
+    local record="$KESHIKI_RUNTIME/current" extra
+    SESSION_PID='' SESSION_START='' SESSION_NAME='' SESSION_DIR=''
+    [ -f "$record" ] && [ ! -L "$record" ] || return 1
+    read -r SESSION_PID SESSION_START SESSION_NAME extra <"$record" || return 1
+    [[ -z $extra && $SESSION_NAME =~ ^session\.[A-Za-z0-9]+$ ]] || return 1
+    SESSION_DIR="$KESHIKI_RUNTIME/$SESSION_NAME"
+    [ -d "$SESSION_DIR" ] && [ ! -L "$SESSION_DIR" ] || return 1
+    keshiki_process_matches "$SESSION_PID" "$SESSION_START" "$HERE/keshiki-start" &&
+        keshiki_process_matches "$SESSION_PID" "$SESSION_START" --session &&
+        keshiki_process_matches "$SESSION_PID" "$SESSION_START" "$SESSION_DIR"
+}
+
+keshiki_send() {
+    local address
+    [ -S "$SESSION_DIR/mpv.sock" ] || return 1
+    address=${SESSION_DIR//\\/\\\\}
+    address=${address//,/\\,}
+    printf '%s\n' "$1" | socat -T 1 - "UNIX-CONNECT:$address/mpv.sock" >/dev/null 2>&1
+}
+
+keshiki_socket_active() {
+    local address=$1 path
+    while read -r _ _ _ _ _ _ _ path; do
+        [ "${path:-}" != "$address" ] || return 0
+    done </proc/net/unix
+    return 1
+}
+
+keshiki_clean_session_dir() {
+    local dir=$1 socket="$1/mpv.sock"
+    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+    [ ! -L "$socket" ] || return 1
+    if [ -S "$socket" ]; then
+        keshiki_socket_active "$socket" && return 1
+        rm -f -- "$socket" || return 1
+    elif [ -e "$socket" ]; then
+        return 1
+    fi
+    rm -f -- "$dir/ready" "$dir/online" "$dir/mpv.pid" || return 1
+    rmdir -- "$dir"
+}
+
+keshiki_clear_own_session() {
+    local own_dir=$1 fd pid start name extra
+    [ ! -L "$KESHIKI_RUNTIME/lock" ] || return 1
+    exec {fd}>"$KESHIKI_RUNTIME/lock" || return 1
+    if flock -n "$fd"; then
+        if [ -f "$KESHIKI_RUNTIME/current" ] && [ ! -L "$KESHIKI_RUNTIME/current" ]; then
+            read -r pid start name extra <"$KESHIKI_RUNTIME/current" || :
+            if [ "${pid:-}" = "$$" ] && [ "${start:-}" = "$(keshiki_start_time "$$")" ] &&
+                [ "${name:-}" = "${own_dir##*/}" ] && [ -z "${extra:-}" ]; then
+                rm -f -- "$KESHIKI_RUNTIME/current"
+            fi
+        fi
+        flock -u "$fd"
+    fi
+    exec {fd}>&-
+}
+
+# Called under the lock. A stale record can only name a private session directory.
+keshiki_stop() {
+    local i mpv_pid='' mpv_start='' extra='' player_matches=0
+    if keshiki_read_session; then
+        if keshiki_send '{"command":["quit"]}'; then
+            for ((i = 0; i < 30; i++)); do
+                keshiki_process_matches "$SESSION_PID" "$SESSION_START" "$HERE/keshiki-start" || break
+                sleep 0.1
+            done
+        fi
+        if keshiki_process_matches "$SESSION_PID" "$SESSION_START" "$HERE/keshiki-start"; then
+            kill -TERM "$SESSION_PID" 2>/dev/null || :
+            for ((i = 0; i < 30; i++)); do
+                keshiki_process_matches "$SESSION_PID" "$SESSION_START" "$HERE/keshiki-start" || break
+                sleep 0.1
+            done
+        fi
+        if keshiki_process_matches "$SESSION_PID" "$SESSION_START" "$HERE/keshiki-start"; then
+            echo 'Keshiki playback did not stop' >&2
+            return 1
+        fi
+    fi
+    if [ -n "$SESSION_DIR" ] && [ -d "$SESSION_DIR" ] && [ ! -L "$SESSION_DIR" ]; then
+        # A crashed supervisor may leave its mpv alive. The socket path in
+        # mpv's verified command line binds that process to this session.
+        [ ! -L "$SESSION_DIR/mpv.pid" ] || return 1
+        if [ -f "$SESSION_DIR/mpv.pid" ]; then
+            read -r mpv_pid mpv_start extra <"$SESSION_DIR/mpv.pid" || :
+            if [ -z "$extra" ] && keshiki_process_matches "$mpv_pid" "$mpv_start" "--input-ipc-server=$SESSION_DIR/mpv.sock"; then
+                player_matches=1
+            fi
+        fi
+        if [ "$player_matches" -eq 1 ]; then
+            if keshiki_send '{"command":["quit"]}'; then
+                for ((i = 0; i < 20; i++)); do
+                    keshiki_process_matches "$mpv_pid" "$mpv_start" "--input-ipc-server=$SESSION_DIR/mpv.sock" || break
+                    sleep 0.1
+                done
+            fi
+            if keshiki_process_matches "$mpv_pid" "$mpv_start" "--input-ipc-server=$SESSION_DIR/mpv.sock"; then
+                kill -TERM "$mpv_pid" 2>/dev/null || :
+            fi
+            for ((i = 0; i < 20; i++)); do
+                keshiki_process_matches "$mpv_pid" "$mpv_start" "--input-ipc-server=$SESSION_DIR/mpv.sock" || break
+                sleep 0.1
+            done
+            if keshiki_process_matches "$mpv_pid" "$mpv_start" "--input-ipc-server=$SESSION_DIR/mpv.sock"; then
+                kill -KILL "$mpv_pid" 2>/dev/null || :
+                for ((i = 0; i < 20; i++)); do
+                    keshiki_process_matches "$mpv_pid" "$mpv_start" "--input-ipc-server=$SESSION_DIR/mpv.sock" || break
+                    sleep 0.1
+                done
+                keshiki_process_matches "$mpv_pid" "$mpv_start" "--input-ipc-server=$SESSION_DIR/mpv.sock" && return 1
+            fi
+        fi
+        if [ -S "$SESSION_DIR/mpv.sock" ] && keshiki_socket_active "$SESSION_DIR/mpv.sock"; then
+            echo "Unverified active socket in $SESSION_DIR" >&2
+            return 1
+        fi
+        if ! keshiki_clean_session_dir "$SESSION_DIR"; then
+            echo "Cannot safely clean session $SESSION_DIR" >&2
+            return 1
+        fi
+    fi
+    rm -f -- "$KESHIKI_RUNTIME/current"
+}
+
+keshiki_component_matches() {
+    local name=$1 pid start extra
+    COMPONENT_PID='' COMPONENT_START=''
+    [ -f "$KESHIKI_RUNTIME/$name.pid" ] && [ ! -L "$KESHIKI_RUNTIME/$name.pid" ] || return 1
+    read -r pid start extra <"$KESHIKI_RUNTIME/$name.pid" || return 1
+    [ -z "$extra" ] || return 1
+    keshiki_process_matches "$pid" "$start" "$HERE/$2" || return 1
+    COMPONENT_PID=$pid COMPONENT_START=$start
+}
+
+keshiki_register_component() {
+    local name=$1 script=$2 start
+    keshiki_lock || return 1
+    if keshiki_component_matches "$name" "$script"; then
+        keshiki_unlock
+        return 1
+    fi
+    if [ -L "$KESHIKI_RUNTIME/$name.pid" ]; then
+        keshiki_unlock
+        return 1
+    fi
+    start=$(keshiki_start_time "$$") || {
+        keshiki_unlock
+        return 1
+    }
+    printf '%s %s\n' "$$" "$start" >"$KESHIKI_RUNTIME/$name.pid" || {
+        keshiki_unlock
+        return 1
+    }
+    keshiki_unlock
+}
+
+keshiki_stop_component() {
+    local name=$1 script=$2 i
+    if keshiki_component_matches "$name" "$script"; then
+        kill -TERM "$COMPONENT_PID" 2>/dev/null || return 1
+        for ((i = 0; i < 30; i++)); do
+            keshiki_process_matches "$COMPONENT_PID" "$COMPONENT_START" "$HERE/$script" || break
+            sleep 0.1
+        done
+        if keshiki_process_matches "$COMPONENT_PID" "$COMPONENT_START" "$HERE/$script"; then
+            return 1
+        fi
+    fi
+    rm -f -- "$KESHIKI_RUNTIME/$name.pid"
+}
+
+keshiki_clear_own_component() {
+    local name=$1 fd pid start extra
+    [ ! -L "$KESHIKI_RUNTIME/lock" ] || return 1
+    exec {fd}>"$KESHIKI_RUNTIME/lock" || return 1
+    if flock -n "$fd"; then
+        if [ -f "$KESHIKI_RUNTIME/$name.pid" ] && [ ! -L "$KESHIKI_RUNTIME/$name.pid" ]; then
+            read -r pid start extra <"$KESHIKI_RUNTIME/$name.pid" || :
+            if [ "${pid:-}" = "$$" ] && [ "${start:-}" = "$(keshiki_start_time "$$")" ] && [ -z "${extra:-}" ]; then
+                rm -f -- "$KESHIKI_RUNTIME/$name.pid"
+            fi
+        fi
+        flock -u "$fd"
+    fi
+    exec {fd}>&-
+}

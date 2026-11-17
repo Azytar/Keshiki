@@ -1,91 +1,182 @@
 #!/bin/bash
 # Realizado por: S.Konqi0139
-#
 # Eres libre de modificarlo a tu gusto, solo te pido
 # nombrarme como autor del script
 
-HERE="$(dirname "$(readlink -f "${0}")")" 
-export running=${0##*/} BCyan='\e[1;36m' CReset="\e[m" DIRCONFIG="$HOME/.config/keshiki/" socketfile="/tmp/mpv_socket_${USER}"
+HERE="$(dirname "$(readlink -f "${0}")")"
+export PATH="${HERE}/bin:${HOME}/.local/bin:${HOME}/.deno/bin:${PATH}"
+export DIRCONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/keshiki/"
+# shellcheck source=keshiki-session
+source "$HERE/keshiki-session"
 
-export PATH="${HERE}/bin:${HOME}/.local/bin:${HOME}/.deno/bin:${PATH}" last_wall="${DIRCONFIG}last_wallpaper.txt"
-JS_ARG=""
-
-if command -v deno >/dev/null 2>&1; then
-    JS_ARG="--js-runtimes deno"
-elif command -v node >/dev/null 2>&1; then
-    JS_ARG="--js-runtimes node"
-elif command -v qjs >/dev/null 2>&1; then
-    JS_ARG="--js-runtimes quickjs"
+audio=(FALSE --no-audio 100)
+opacity=1
+below_desk=FALSE
+if [ -f "${DIRCONFIG}keshiki.cfg" ]; then
+    # shellcheck disable=SC1090
+    source "${DIRCONFIG}keshiki.cfg"
 fi
 
-[ -f "${DIRCONFIG}keshiki.cfg" ] && source "${DIRCONFIG}keshiki.cfg"
-
-if [ -z "$1" ]; then 
-    [ -f "$last_wall" ] && wallpaper=$(cat "$last_wall") || exit 0
-else 
-    wallpaper="${1}"
-    [ -f "$last_wall" ] && grep -qF "${1}" "$last_wall" || echo "${1}" > "$last_wall"
-fi
-
-if [[ ! "$wallpaper" =~ ^https:// ]]; then
-    if [ ! -f "$wallpaper" ]; then 
-        yad --window-icon=state-error --image=emblem-error \
-        --height=139 --center --fixed --title="Error" --button=gtk-ok \
-        --text="\nNo se puede acceder al archivo o URL:   \n$wallpaper   "
-        exit 1
-    fi
-fi
-
-launch_wallpaper(){ 
-    echo -e "\n${BCyan}${wallpaper}${CReset}\n"
-    "${HERE}/keshiki-cli" -f; sleep 0.2s
-    xwi_args="-fs -sp -st -nf -s -fdt -o $opacity"
-    mpv_args="-wid WID --loop ${audio[1]} --volume=${audio[2]} --no-osc --input-ipc-server=$socketfile --no-osd-bar --no-border --no-resume-playback --input-vo-keyboard=no $wallpaper"
-
-    if [[ "$wallpaper" =~ ^https:// ]]; then
-    YTDL_OPTS=""
-    if [ -n "$JS_ARG" ]; then
-        # Extraer solo el nombre del runtime (ej: "deno", "node" o "quickjs")
-        RUNTIME_NAME="${JS_ARG#--js-runtimes }"
-        YTDL_OPTS="--ytdl-raw-options=js-runtimes=${RUNTIME_NAME}"
-    fi
-        xwinwrap $xwi_args --  mpv.bash $mpv_args $YTDL_OPTS \
-        --ytdl-format="bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
-    else
-        xwinwrap $xwi_args -- mpv.bash $mpv_args
-    fi
-}
-
-( [ "$below_desk" = TRUE ] && if pidof nemo-desktop >/dev/null; then sleep 1.39s
-    Name_DESK=$(wmctrl -l | cut -d' ' -f4-7 | grep -e '^Escritorio$' -e '^Desktop$')
-    Desktop_ID=$(xdotool search --name "^$Name_DESK$" | head -1)
-     wmctrl -ia "$Desktop_ID"
-fi ) &
-
-launch_wallpaper &
-sleep 0.39s
-
-(
-    last_state="unknown"
-    while pidof -x mpv.bash >/dev/null; do
-        WINDOW_ID=$(xdotool getactivewindow)
-        if [ -n "$WINDOW_ID" ]; then
-            WM_STATE=$(xprop -id "$WINDOW_ID" _NET_WM_STATE)
-            
-            if [[ "$WM_STATE" == *"_NET_WM_STATE_MAXIMIZED_HORZ"* && "$WM_STATE" == *"_NET_WM_STATE_MAXIMIZED_VERT"* ]] || \
-               [[ "$WM_STATE" == *"_NET_WM_STATE_FULLSCREEN"* ]]; then
-                if [ "$last_state" != "paused" ]; then
-                    echo '{ "command": ["set_property", "pause", true] }' | socat - "$socketfile"
-                    last_state="paused"
-                fi
-            else
-                if [ "$last_state" != "playing" ]; then
-                    echo '{ "command": ["set_property", "pause", false] }' | socat - "$socketfile"
-                    last_state="playing"
+run_session() {
+    local session_dir=$1 wallpaper=$2 child='' child_start='' i window state wid=WID last_state=unknown
+    local mpv_pid mpv_start extra desktop_pid='' desktop_start=''
+    local -a xwi_args mpv_args ytdl_opts=()
+    SESSION_DIR=$session_dir
+    # shellcheck disable=SC2329
+    cleanup_session() {
+        trap - EXIT INT TERM HUP
+        if [ -n "$desktop_start" ] && [ "$(keshiki_start_time "$desktop_pid")" = "$desktop_start" ]; then
+            kill -TERM "$desktop_pid" 2>/dev/null || :
+            wait "$desktop_pid" 2>/dev/null || :
+        fi
+        keshiki_send '{"command":["quit"]}' || :
+        if [ -f "$session_dir/mpv.pid" ] && [ ! -L "$session_dir/mpv.pid" ]; then
+            read -r mpv_pid mpv_start extra <"$session_dir/mpv.pid" || :
+            if [ -z "${extra:-}" ] && keshiki_process_matches "${mpv_pid:-}" "${mpv_start:-}" "--input-ipc-server=$session_dir/mpv.sock"; then
+                kill -TERM "$mpv_pid" 2>/dev/null || :
+                for ((i = 0; i < 10; i++)); do
+                    keshiki_process_matches "$mpv_pid" "$mpv_start" "--input-ipc-server=$session_dir/mpv.sock" || break
+                    sleep 0.1
+                done
+                if keshiki_process_matches "$mpv_pid" "$mpv_start" "--input-ipc-server=$session_dir/mpv.sock"; then
+                    kill -KILL "$mpv_pid" 2>/dev/null || :
                 fi
             fi
         fi
-        sleep 0.8s
+        if [ -n "$child_start" ] && keshiki_group_matches "$child" "$child_start"; then
+            kill -TERM -- "-$child" 2>/dev/null || :
+            for ((i = 0; i < 20; i++)); do
+                keshiki_group_matches "$child" "$child_start" || break
+                sleep 0.1
+            done
+            if keshiki_group_matches "$child" "$child_start"; then
+                kill -KILL -- "-$child" 2>/dev/null || :
+            fi
+        fi
+        [ -z "${child:-}" ] || wait "$child" 2>/dev/null || :
+        if keshiki_clean_session_dir "$session_dir"; then
+            keshiki_clear_own_session "$session_dir" || :
+        fi
+    }
+    trap cleanup_session EXIT
+    trap 'exit 0' INT TERM HUP
+    # The parent publishes the supervisor identity before allowing playback.
+    for ((i = 0; i < 100; i++)); do
+        [ -f "$session_dir/ready" ] && break
+        sleep 0.05
     done
-) >/dev/null 2>&1 &
+    [ -f "$session_dir/ready" ] || exit 1
+    rm -f -- "$session_dir/ready"
+    xwi_args=(-fs -sp -st -nf -s -fdt -o "$opacity")
+    if xwinwrap -h 2>&1 | grep -Fq 'default is %WID'; then wid=%WID; fi
+    mpv_args=(-wid "$wid" --loop "${audio[1]}" "--volume=${audio[2]}" --no-osc
+        "--input-ipc-server=$session_dir/mpv.sock" --no-osd-bar --no-border
+        --no-resume-playback --input-vo-keyboard=no)
+    if [[ $wallpaper =~ ^https?:// ]]; then
+        if command -v deno >/dev/null 2>&1; then
+            ytdl_opts+=(--ytdl-raw-options=js-runtimes=deno)
+        elif command -v node >/dev/null 2>&1; then
+            ytdl_opts+=(--ytdl-raw-options=js-runtimes=node)
+        elif command -v qjs >/dev/null 2>&1; then
+            ytdl_opts+=(--ytdl-raw-options=js-runtimes=quickjs)
+        fi
+        ytdl_opts+=("--ytdl-format=bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best")
+    fi
+    KESHIKI_SESSION_DIR=$session_dir setsid xwinwrap "${xwi_args[@]}" -- mpv.bash "${mpv_args[@]}" "${ytdl_opts[@]}" -- "$wallpaper" &
+    child=$!
+    child_start=$(keshiki_start_time "$child") || child_start=
+    if [ "$below_desk" = TRUE ] && pidof nemo-desktop >/dev/null; then
+        (
+            sleep 1.39
+            name=$(wmctrl -l | cut -d' ' -f4-7 | grep -e '^Escritorio$' -e '^Desktop$')
+            desktop_id=$(xdotool search --name "^$name$" | head -1)
+            wmctrl -ia "$desktop_id"
+        ) &
+        desktop_pid=$!
+        desktop_start=$(keshiki_start_time "$desktop_pid") || desktop_start=''
+    fi
+    while [ -n "$child_start" ] && [ "$(keshiki_start_time "$child")" = "$child_start" ]; do
+        window=$(xdotool getactivewindow 2>/dev/null) || window=
+        if [ -n "$window" ]; then
+            state=$(xprop -id "$window" _NET_WM_STATE 2>/dev/null) || state=
+            if [[ $state == *'_NET_WM_STATE_MAXIMIZED_HORZ'* && $state == *'_NET_WM_STATE_MAXIMIZED_VERT'* ]] ||
+                [[ $state == *'_NET_WM_STATE_FULLSCREEN'* ]]; then
+                if [ "$last_state" != paused ] && keshiki_send '{"command":["set_property","pause",true]}'; then
+                    last_state=paused
+                fi
+            elif [ -n "$state" ] && [ "$last_state" != playing ] && keshiki_send '{"command":["set_property","pause",false]}'; then
+                last_state=playing
+            fi
+        fi
+        sleep 0.8
+    done
+    wait "$child" 2>/dev/null || :
+    exit 0
+}
 
+if [ "${1:-}" = --session ]; then
+    keshiki_runtime || exit 1
+    [[ ${2:-} = "$KESHIKI_RUNTIME"/session.* && ${2##*/} =~ ^session\.[A-Za-z0-9]+$ ]] || exit 1
+    [ -d "$2" ] && [ ! -L "$2" ] || exit 1
+    : >"$2/online" || exit 1
+    run_session "$2" "$3"
+fi
+
+last_wall="${DIRCONFIG}last_wallpaper.txt"
+if [ -z "${1:-}" ]; then
+    [ -f "$last_wall" ] && IFS= read -r wallpaper <"$last_wall" || exit 0
+else
+    wallpaper=$1
+fi
+if [[ ! $wallpaper =~ ^https?:// ]] && [ ! -f "$wallpaper" ]; then
+    yad --window-icon=state-error --image=emblem-error --height=139 --center --fixed \
+        --title="Error" --button=gtk-ok --text="No se puede acceder al archivo o URL: $wallpaper"
+    exit 1
+fi
+mkdir -p -- "$DIRCONFIG" || exit 1
+keshiki_lock || exit 1
+if ! keshiki_stop; then
+    keshiki_unlock
+    exit 1
+fi
+if ! printf '%s\n' "$wallpaper" >"$last_wall"; then
+    keshiki_unlock
+    exit 1
+fi
+session_dir=$(mktemp -d "$KESHIKI_RUNTIME/session.XXXXXXXX") || {
+    keshiki_unlock
+    exit 1
+}
+(
+    exec {KESHIKI_LOCK}>&-
+    exec "$HERE/keshiki-start" --session "$session_dir" "$wallpaper"
+) </dev/null >/dev/null 2>&1 &
+supervisor=$!
+supervisor_start=$(keshiki_start_time "$supervisor") || {
+    rmdir -- "$session_dir" 2>/dev/null || :
+    keshiki_unlock
+    exit 1
+}
+for ((i = 0; i < 100; i++)); do
+    [ ! -f "$session_dir/online" ] || break
+    sleep 0.05
+done
+if [ ! -f "$session_dir/online" ] || ! keshiki_process_matches "$supervisor" "$supervisor_start" "$HERE/keshiki-start" ||
+    ! keshiki_process_matches "$supervisor" "$supervisor_start" --session; then
+    if keshiki_process_matches "$supervisor" "$supervisor_start" "$HERE/keshiki-start"; then
+        kill -TERM "$supervisor" 2>/dev/null || :
+    fi
+    keshiki_unlock
+    exit 1
+fi
+if ! printf '%s %s %s\n' "$supervisor" "$supervisor_start" "${session_dir##*/}" >"$KESHIKI_RUNTIME/current" ||
+    ! : >"$session_dir/ready"; then
+    if keshiki_process_matches "$supervisor" "$supervisor_start" "$HERE/keshiki-start"; then
+        kill -TERM "$supervisor" 2>/dev/null || :
+        wait "$supervisor" 2>/dev/null || :
+    fi
+    rm -f -- "$KESHIKI_RUNTIME/current"
+    keshiki_unlock
+    exit 1
+fi
+keshiki_unlock
