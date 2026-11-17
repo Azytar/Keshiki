@@ -38,7 +38,7 @@ Existen varias soluciones para lograr tener un video como fondo de pantalla en L
 
 ## Instalación ⏬
 
-Keshiki incluye un script que verificará automáticamente que tengas todas las dependencias necesarias instaladas en tu distribución y configurará el lanzador global junto al acceso directo en tu menú de aplicaciones:
+Keshiki incluye un script que comprueba las dependencias e instala el lanzador y el acceso al menú. Por defecto instala para el usuario actual, sin privilegios:
 
 ### Instrucciones de consola
 
@@ -48,9 +48,10 @@ git clone https://github.com/Konqi0139/Keshiki.git
 cd Keshiki
 
 # 2. Otorgar permisos y ejecutar el instalador
-chmod +x install.sh
-sudo ./install.sh
+./install.sh
 ```
+
+Los archivos se instalan en `${XDG_DATA_HOME:-~/.local/share}/keshiki` y el comando en `~/.local/bin`. Para instalar para todos los usuarios en `/usr/local`, ejecuta `sudo ./install.sh`. El instalador no instala dependencias ni ejecuta `sudo` por su cuenta.
 
 ### Tabla de Dependencias Verificadas
 
@@ -61,9 +62,10 @@ sudo ./install.sh
 | `mpv` | Renderizado multimedia fluido | Requerido |
 | `xwinwrap` | Dibujado de video en la Root Window (X11) | Requerido |
 | `socat` | Sockets de comunicación IPC con mpv | Requerido |
-| `xdotool` / `wmctrl` | Monitoreo y detección de estado de ventanas | Requerido |
+| `xdotool` / `wmctrl` / `xprop` | Monitoreo y detección de estado de ventanas | Requerido |
+| `flock` / `setsid` / `sha256sum` | Aislamiento, control de sesiones e integridad | Requerido |
 | `ffmpeg` | Captura de fotogramas para recursos | Requerido |
-| `imagemagick` | Tratamiento y redimensión de miniaturas | Requerido |
+| `imagemagick` | Tratamiento y redimensión de miniaturas | Opcional |
 
 ---
 ### Instalación rápida de `xwinwrap` (Si no está en tus repositorios)
@@ -76,7 +78,7 @@ yay -S xwinwrap-mmhobi7-git
 Para **Debian / Ubuntu / Linux Mint** (compilación desde el fork recomendado):
 ```bash
 sudo apt install git build-essential libx11-dev libxext-dev libxrender-dev
-git clone https://github.com
+git clone https://github.com/mmhobi7/xwinwrap.git
 cd xwinwrap && make && sudo make install
 ```
 
@@ -84,13 +86,14 @@ cd xwinwrap && make && sudo make install
 
 ### Desinstalación 🗑️
 
-Si deseas desinstalar Keshiki por completo de tu sistema, simplemente ejecuta el mismo instalador con el parámetro `--remove`:
+Para desinstalar, usa la misma modalidad que durante la instalación:
 
 ```bash
-sudo ./install.sh --remove
+./install.sh --remove       # instalación de usuario
+sudo ./install.sh --remove  # instalación de sistema
 ```
 
-> **Nota:** Esto eliminará los archivos del programa en `/opt/keshiki`, el acceso directo del menú y el lanzador global. Si también quieres borrar tus configuraciones y miniaturas guardadas, elimina la carpeta `~/.config/keshiki`.
+La desinstalación conserva la configuración y las miniaturas en `${XDG_CONFIG_HOME:-~/.config}/keshiki`. Las instalaciones antiguas en `/opt/keshiki` deben revisarse y retirarse manualmente.
 
 ## Screenshots 📸
 

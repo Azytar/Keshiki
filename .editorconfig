@@ -1,0 +1,5 @@
+root = true
+
+[*.bats]
+# Bats syntax is formatted separately with shfmt -ln bats.
+ignore = true
