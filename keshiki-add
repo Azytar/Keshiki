@@ -4,37 +4,92 @@
 # Eres libre de modificarlo a tu gusto, solo te pido
 # nombrarme como autor del script
 
-export num="$RANDOM" PATH="${HOME}/.local/bin:${HOME}/.deno/bin:${PATH}"
-txt="/tmp/keshiki_archives_${num}.txt" file="${1}"
+HERE="$(dirname "$(readlink -f "${0}")")"
+export HERE PATH="${HOME}/.local/bin:${HOME}/.deno/bin:${PATH}"
+export DIRCONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/keshiki/"
+ICON="${ICON:-${HERE}/keshiki.png}"
 
-JS_ARG=""
+JS_RUNTIME=""
 if command -v deno >/dev/null 2>&1; then
-    JS_ARG="--js-runtimes deno"
+    JS_RUNTIME=deno
 elif command -v node >/dev/null 2>&1; then
-    JS_ARG="--js-runtimes node"
+    JS_RUNTIME=node
 elif command -v qjs >/dev/null 2>&1; then
-    JS_ARG="--js-runtimes quickjs"
+    JS_RUNTIME=quickjs
+fi
+
+file="${1:-}"
+if [ -z "$file" ]; then
+    echo "Uso: keshiki-add <archivo|carpeta|url>" >&2
+    exit 1
+fi
+if [[ ! $file =~ ^https?:// ]]; then
+    [ -e "$file" ] || {
+        printf 'No existe: %s\n' "$file" >&2
+        exit 1
+    }
+    file=$(readlink -f -- "$file") || exit 1
 fi
 
 [ ! -d "${DIRCONFIG}desktops/" ] && mkdir -p "${DIRCONFIG}desktops/"
 
-variables(){ 
+# Escapa un valor para el campo Exec de un .desktop según la especificación
+# de Desktop Entry; no rigen las reglas de comillas simples de Bash.
+# SC1003: el patrón \\ compara deliberadamente una sola barra invertida.
+# shellcheck disable=SC1003
+desktop_exec_arg() {
+    local input="$1" output="" char i
+    for ((i = 0; i < ${#input}; i++)); do
+        char=${input:i:1}
+        case "$char" in
+            \\) output+='\\\\' ;;
+            '"') output+='\\"' ;;
+            '`') output+='\\`' ;;
+            '$') output+='\\$' ;;
+            %) output+='%%' ;;
+            *) output+="$char" ;;
+        esac
+    done
+    printf '"%s"' "$output"
+}
+
+# Escapa un valor de cadena para el formato Desktop Entry.
+# SC1003: el patrón \\ compara deliberadamente una sola barra invertida.
+# shellcheck disable=SC1003
+desktop_string_escape() {
+    local input="$1" output="" char i
+    for ((i = 0; i < ${#input}; i++)); do
+        char=${input:i:1}
+        case "$char" in
+            \\) output+='\\' ;;
+            $'\n') output+='\n' ;;
+            $'\t') output+='\t' ;;
+            $'\r') output+='\r' ;;
+            *) output+="$char" ;;
+        esac
+    done
+    printf '%s' "$output"
+}
+
+variables() {
     if [[ "$file" =~ youtube\.com/watch\?v= || "$file" =~ youtu\.be/ || "$file" =~ youtube\.com/shorts/ ]]; then
         export is_url="TRUE"
         export format="[YouTube]"
-        
+
         if command -v yt-dlp >/dev/null 2>&1; then
-            metadata=$(yt-dlp $JS_ARG --no-warnings --no-playlist --get-title --get-duration "${file}")
+            local -a js_opts=()
+            [ -n "$JS_RUNTIME" ] && js_opts=(--js-runtimes "$JS_RUNTIME")
+            metadata=$(yt-dlp "${js_opts[@]}" --no-warnings --no-playlist --get-title --get-duration "${file}")
             file_name=$(echo "$metadata" | head -1)
             duration_raw=$(echo "$metadata" | tail -1)
-            
-            [ -z "$file_name" ] && file_name="YouTube Video ${num}"
+
+            [ -z "$file_name" ] && file_name="YouTube Video"
             [ -z "$duration_raw" ] && duration_raw="00:00"
-            
+
             duration="Streaming ($duration_raw)"
             resolution_fps="Auto (yt-dlp)"
         else
-            file_name="YouTube Video ${num}"
+            file_name="YouTube Video"
             duration="Streaming"
             resolution_fps="Auto"
         fi
@@ -42,15 +97,15 @@ variables(){
         export is_url="FALSE"
         local ext="${file##*.}"
         ext="${ext,,}"
-        
+
         if [[ "$ext" =~ ^(mp4|gif|mkv|webm|mov|avi)$ ]]; then
             export format=".$ext"
         else
             export format=""
         fi
 
-        if [ -n "$format" ] && command -v ffprobe >/dev/null 2>&1; then
-            IFS='|' read -r width height fps_raw raw_dur <<< "$(ffprobe -v error -select_streams v:0 -show_entries format=duration:stream=width,height,r_frame_rate -of csv=p=0:s='|' "${file}"|tr "\n" "|")"
+        if [ -n "$format" ] && command -v ffprobe >/dev/null 2>&1 && [ -f "$file" ]; then
+            IFS='|' read -r width height fps_raw raw_dur <<<"$(ffprobe -v error -select_streams v:0 -show_entries format=duration:stream=width,height,r_frame_rate -of csv=p=0:s='|' "${file}" | tr "\n" "|")"
 
             if [ -n "$raw_dur" ]; then
                 raw_dur=${raw_dur%.*}
@@ -58,9 +113,9 @@ variables(){
             else
                 duration="Unknown"
             fi
-            
-            if [ -n "$fps_raw" ] && [[ "$fps_raw" == *"/"* ]]; then
-                local fps=$(( ${fps_raw%/*} / ${fps_raw#*/} ))
+
+            if [[ $fps_raw =~ ^[0-9]+/[0-9]+$ ]] && ((10#${fps_raw#*/} != 0)); then
+                local fps=$((10#${fps_raw%/*} / 10#${fps_raw#*/}))
                 resolution_fps="${width}x${height} @ ${fps}fps"
             else
                 resolution_fps="${width}x${height} @ ${fps_raw}fps"
@@ -72,69 +127,158 @@ variables(){
     fi
 }
 
-desktop(){ 
+# Genera la miniatura del vídeo en un archivo temporal único. Devuelve la
+# ruta por la variable global frame_thumb; vacía si no se pudo generar.
+make_thumbnail() {
+    frame_thumb=""
+    local tmp_thumb="$scratch/thumbnail.jpg"
+
+    if command -v ffmpegthumbnailer >/dev/null 2>&1; then
+        ffmpegthumbnailer -i "${file}" -s 140 -o "$tmp_thumb" 2>/dev/null
+    else
+        ffmpeg -y -i "${file}" -ss 00:00:01 -vframes 1 "$tmp_thumb" 2>/dev/null
+    fi
+
+    # La generación solo cuenta como exitosa si quedó una imagen legible.
+    if [ -s "$tmp_thumb" ]; then
+        frame_thumb=$tmp_thumb
+    else
+        rm -f "$tmp_thumb"
+    fi
+}
+
+# Redimensiona la miniatura al tamaño del icono de la interfaz.
+scale_thumbnail() {
+    local src="$1" dst="$2"
+    if command -v convert >/dev/null 2>&1; then
+        convert "$src" -resize 139x79 "$dst" 2>/dev/null && return 0
+    fi
+    ffmpeg -y -i "$src" -vf "scale=139:79" "$dst" 2>/dev/null && return 0
+    return 1
+}
+
+# Nombre de entrada estable: el nombre base solo se usa si la entrada
+# existente corresponde al mismo vídeo; en caso de colisión (por ejemplo
+# a/intro.mp4 y b/intro.mp4) se añade una suma de control de la ruta.
+resolve_entry_name() {
+    local desktop_path="${DIRCONFIG}desktops/${NAME}.desktop"
+    local wanted_source existing_source existing_exec legacy_exec
+    local base_name checksum length suffix=0 candidate
+
+    wanted_source="X-Keshiki-Source=$(desktop_string_escape "$file")"
+    if [[ ! -e $desktop_path ]]; then
+        return 0
+    fi
+
+    existing_source=$(sed -n '/^X-Keshiki-Source=/p' "$desktop_path")
+    [[ $existing_source == "$wanted_source" ]] && return 0
+    if [[ -z $existing_source ]]; then
+        existing_exec=$(sed -n '/^Exec=/p' "$desktop_path")
+        legacy_exec="Exec=${HERE}/keshiki-start '${file}'"
+        [[ $existing_exec == "$legacy_exec" ]] && return 0
+    fi
+
+    base_name=$NAME
+    read -r checksum length < <(printf '%s' "$file" | cksum)
+    while :; do
+        candidate="${base_name}_${checksum}_${length}"
+        ((suffix > 0)) && candidate+="_${suffix}"
+        desktop_path="${DIRCONFIG}desktops/${candidate}.desktop"
+        if [[ ! -e $desktop_path ]]; then
+            NAME=$candidate
+            return 0
+        fi
+        existing_source=$(sed -n '/^X-Keshiki-Source=/p' "$desktop_path")
+        if [[ $existing_source == "$wanted_source" ]]; then
+            NAME=$candidate
+            return 0
+        fi
+        ((suffix += 1))
+    done
+}
+
+desktop() {
+    local frame_thumb=""
+
     if [ "$is_url" = "TRUE" ]; then
         NAME=$(sed "s/[=,.]//g;s/ /_/g;s/[^A-Za-z0-9_]//g" <<<"${file_name}")
+        [ -n "$NAME" ] || NAME=wallpaper
+        resolve_entry_name
         DIR="${DIRCONFIG}resources/${NAME}"
         mkdir -p "${DIR}"
 
         if command -v yt-dlp >/dev/null 2>&1; then
-            yt-dlp $JS_ARG --no-warnings --no-playlist --write-thumbnail --skip-download --convert-thumbnails jpg -o "/tmp/yt_frame${num}" "${file}"
+            local -a js_opts=()
+            [ -n "$JS_RUNTIME" ] && js_opts=(--js-runtimes "$JS_RUNTIME")
+            local yt_thumb="$scratch/thumbnail"
+            yt-dlp "${js_opts[@]}" --no-warnings --no-playlist --write-thumbnail \
+                --skip-download --convert-thumbnails jpg -o "$yt_thumb" "${file}" 2>/dev/null
             local downloaded_thumb
-            downloaded_thumb=$(find /tmp/ -maxdepth 1 -name "yt_frame${num}.*" | head -1)
-            [ -f "$downloaded_thumb" ] && mv "$downloaded_thumb" "/tmp/frame${num}.jpg"
+            downloaded_thumb=$(find "$(dirname "$yt_thumb")" -maxdepth 1 -name "$(basename "$yt_thumb").*" -type f -print -quit 2>/dev/null)
+            if [ -n "$downloaded_thumb" ] && [ -s "$downloaded_thumb" ]; then
+                frame_thumb=$downloaded_thumb
+            fi
         fi
-
-        [ ! -f "/tmp/frame${num}.jpg" ] && cp "${ICON}" "/tmp/frame${num}.jpg" 2>/dev/null
     else
-        full_name="${file##*/}" 
-        file_name="${full_name%$format}"
-        NAME=$(sed "s/[=,.]//g;s/ /_/g" <<<"${file_name}")
+        full_name="${file##*/}"
+        file_name="${full_name%"$format"}"
+        NAME=${file_name//[^A-Za-z0-9_-]/_}
+        [ -n "$NAME" ] || NAME=wallpaper
+        resolve_entry_name
         DIR="${DIRCONFIG}resources/${NAME}"
         mkdir -p "${DIR}"
-        
-        if command -v ffmpegthumbnailer >/dev/null 2>&1; then
-            ffmpegthumbnailer -i "${file}" -s 140 -o "/tmp/frame${num}.jpg" 2>/dev/null
-        else
-            ffmpeg -y -i "${file}" -ss 00:00:01 -vframes 1 "/tmp/frame${num}.jpg" 2>/dev/null
-        fi
+
+        make_thumbnail
     fi
-    
-        if command -v convert >/dev/null; then 
-            convert "/tmp/frame${num}.jpg" -resize 139x79 "${DIR}/image.jpg" 2>/dev/null
-        else 
-            ffmpeg -y -i "/tmp/frame${num}.jpg" -vf "scale=139:78" "${DIR}/image.jpg" 2>/dev/null
+
+    if [ -n "$frame_thumb" ]; then
+        if ! scale_thumbnail "$frame_thumb" "${DIR}/image.jpg"; then
+            rm -f "${DIR}/image.jpg"
         fi
+        rm -f -- "$frame_thumb"
+    fi
+
+    # Sin miniatura real se usa el icono del programa; una entrada sin
+    # imagen válida se mostraría vacía en la interfaz.
+    if [ ! -s "${DIR}/image.jpg" ]; then
+        cp "${ICON}" "${DIR}/image.jpg" 2>/dev/null
+    fi
 
     local comment_text
-    if [ "$is_url" = "TRUE" ]; then 
+    if [ "$is_url" = "TRUE" ]; then
         comment_text="YouTube Stream | ${duration}"
-    else 
+    else
         comment_text="${full_name} | ${duration} | ${resolution_fps}"
     fi
 
-    cat <<EOF > "${DIRCONFIG}desktops/${NAME}.desktop"
+    local exec_line source_value
+    exec_line="bash $(desktop_exec_arg "${HERE}/keshiki-start") $(desktop_exec_arg "$file")"
+    source_value="$(desktop_string_escape "$file")"
+
+    cat <<EOF >"${DIRCONFIG}desktops/${NAME}.desktop"
 [Desktop Entry]
-Name=${file_name}
+Name=$(desktop_string_escape "$file_name")
 GenericName=
-Comment=${comment_text}
-Exec=${HERE}/keshiki-start '${file}'
-Icon=${DIR}/image.jpg
+Comment=$(desktop_string_escape "$comment_text")
+Exec=${exec_line}
+X-Keshiki-Source=${source_value}
+Icon=$(desktop_string_escape "${DIR}/image.jpg")
 Type=Application
 EOF
-    
-    rm -f "/tmp/frame${num}.jpg" "/tmp/yt_frame${num}"*
 }
 
-if [ -d "$file" ] && [ "$is_url" != "TRUE" ]; then 
-    cd "$file" || exit
-    find "$(pwd)" -maxdepth 1 -type f \( -name "*.mp4" -o -name "*.gif" -o -name "*.mkv" -o -name "*.webm" -o -name "*.mov" -o -name "*.avi" \) > "$txt" 2>/dev/null
-    
-    if [ -s "$txt" ]; then
-        xargs -P 3 -n 1 -I {} "${HERE}/keshiki-add" {} < "$txt"
-    fi
-    rm -f "$txt"
+if [ -d "$file" ]; then
+    # NUL como separador: los nombres pueden contener espacios o saltos.
+    while IFS= read -r -d '' video_file; do
+        "${HERE}/keshiki-add" "$video_file"
+    done < <(find "$file" -maxdepth 1 -type f \( -name "*.mp4" -o -name "*.gif" -o -name "*.mkv" -o -name "*.webm" -o -name "*.mov" -o -name "*.avi" \) -print0 2>/dev/null | sort -z)
 else
     variables
-    desktop
+    scratch=$(mktemp -d "${TMPDIR:-/tmp}/keshiki-add.XXXXXXXX") || exit 1
+    trap 'rm -rf -- "$scratch"' EXIT
+    trap 'exit 1' INT TERM HUP
+    [ ! -L "${DIRCONFIG}.library.lock" ] || exit 1
+    exec {library_lock}>"${DIRCONFIG}.library.lock" || exit 1
+    flock -x "$library_lock" || exit 1
+    desktop || exit 1
 fi

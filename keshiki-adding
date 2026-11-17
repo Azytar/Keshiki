@@ -3,26 +3,33 @@
 #
 # Eres libre de modificarlo a tu gusto, solo te pido
 # nombrarme como autor del script
+#
+# Las funciones Select_files y Exit se invocan desde yad mediante export -f
+# y Color lo aporta el entorno gráfico de Keshiki.
 
-export rand_id="$RANDOM" list="/tmp/keshiki_files_${rand_id}.txt"
-
-if [[ $LANG == es* ]]; then 
+list=$(mktemp "${TMPDIR:-/tmp}/keshiki-files.XXXXXXXX") || exit 1
+trap 'rm -f -- "$list"' EXIT
+trap 'exit 1' INT TERM
+export list
+Color=${Color:-"color='#31E6F0'"}
+export Color
+if [[ $LANG == es* ]]; then
     Lan=(
-        "Añadir Contenido a Keshiki" 
-        "Cancelar" 
+        "Añadir Contenido a Keshiki"
+        "Cancelar"
         "Aceptar"
         "Seleccionar"
-        "Seleccionar archivos o carpetas locales:" 
+        "Seleccionar archivos o carpetas locales:"
         "O pegar un enlace de YouTube / Stream:"
         "Buscar..."
     )
-else 
+else
     Lan=(
-        "Add Content to Keshiki" 
-        "Cancel" 
-        "Accept" 
+        "Add Content to Keshiki"
+        "Cancel"
+        "Accept"
         "Select"
-        "Select local files or folders:" 
+        "Select local files or folders:"
         "Or paste a YouTube / Stream link:"
         "Browse..."
     )
@@ -31,32 +38,34 @@ fi
 cd "$HOME" || exit
 export title="${Lan[4]%:}" bt1="${Lan[1]}" bt2="${Lan[3]}"
 
-Select_files(){ Exit
-    keshiki --window-icon="$ICON" --add-preview --file --multiple --separator="\n" \
-    --title="$title" --center --width=931 --height=639 \
-    --button="<span $Color>$bt1</span>!gtk-cancel:1" \
-    --button="<span $Color>$bt2</span>!document-open:0" \
-    --file-filter="Video | *.mp4 *.mkv *.webm *.mov *.avi" --file-filter="Imagen | *.gif" > "$list"
+# shellcheck disable=SC2329
+Select_files() {
+    Exit
+    keshiki --window-icon="$ICON" --add-preview --file --multiple --separator=$'\n' \
+        --title="$title" --center --width=931 --height=639 \
+        --button="<span $Color>$bt1</span>!gtk-cancel:1" \
+        --button="<span $Color>$bt2</span>!document-open:0" \
+        --file-filter="Video | *.mp4 *.mkv *.webm *.mov *.avi" --file-filter="Imagen | *.gif" >"$list"
 }
 export -f Select_files
-Exit(){ 
+# shellcheck disable=SC2329
+Exit() {
     kill -USR1 "$YAD_PID"
 }
 export -f Exit
-trap "rm -f $list" EXIT INT TERM
-
 res=$(keshiki --window-icon="$ICON" --center --width=550 --height=139 --form \
---title="${Lan[0]}" --borders=11 --align=left \
---field="${Lan[4]}":FBTN "bash -c Select_files" \
---field="${Lan[5]}":TXT "" \
---button="<span $Color>${Lan[1]}</span>!gtk-cancel:1" \
---button="<span $Color>${Lan[2]}</span>!gtk-ok:0")
+    --title="${Lan[0]}" --borders=11 --align=left \
+    --field="${Lan[4]}":FBTN "bash -c Select_files" \
+    --field="${Lan[5]}":TXT "" \
+    --button="<span $Color>${Lan[1]}</span>!gtk-cancel:1" \
+    --button="<span $Color>${Lan[2]}</span>!gtk-ok:0")
 
 url_input=$(cut -d'|' -f2 <<<"$res")
-echo $res
+
 if [ -s "$list" ]; then
     echo "Procesando archivos locales..."
-    xargs -P 3 -n 1 -I {} "${HERE}/keshiki-add" {} < "$list"
+    # -d '\n': las rutas pueden contener espacios; nunca se re-expande $(cat).
+    xargs -d '\n' -r -P 3 -n 1 "${HERE}/keshiki-add" <"$list"
 fi
 
 if [ -n "$url_input" ] && [[ "$url_input" =~ ^https:// ]]; then

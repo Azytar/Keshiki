@@ -1,47 +1,36 @@
 #!/bin/bash
 # Realizado por: S.Konqi0139
-#
 # Eres libre de modificarlo a tu gusto, solo te pido
 # nombrarme como autor del script
 
-export HERE="$(dirname "$(readlink -f "${0}")")"
-export DIRCONFIG="$HOME/.config/keshiki/"
-export CONFIG="${DIRCONFIG}keshiki.cfg"
-[ -f "${CONFIG}" ] && source "${CONFIG}"
-
-list_tmp=$(mktemp /tmp/keshiki_pl.XXXXXX)
+HERE="$(dirname "$(readlink -f "${0}")")"
+DIRCONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/keshiki/"
+ICON=${ICON:-$HERE/keshiki.png}
 playlist_file="${DIRCONFIG}playlist.txt"
+items=()
 
-# Construcción limpia en memoria de los wallpapers indexados
-for desk in "${DIRCONFIG}desktops/"*.desktop; do 
-    [ -e "$desk" ] || continue
-    name="${desk##*/}"
-    name="${name%.desktop}"
-    icon=$(awk -F '=' '/^Icon=/{print $2}' "$desk")
-    
-    # Comprobar si ya estaba marcado en la playlist existente
-    if grep -qF "$name" "$playlist_file"; then
-        echo "TRUE ${icon} ${name}" >> "$list_tmp"
+for desk in "${DIRCONFIG}desktops/"*.desktop; do
+    [ -f "$desk" ] || continue
+    name=${desk##*/}
+    name=${name%.desktop}
+    icon=$(sed -n 's/^Icon=//p' "$desk")
+    if [ -f "$playlist_file" ] && grep -qxF -- "$name" "$playlist_file"; then
+        items+=(TRUE "$icon" "$name")
     else
-        echo "FALSE ${icon} ${name}" >> "$list_tmp"
+        items+=(FALSE "$icon" "$name")
     fi
 done
-
-if [ ! -s "$list_tmp" ]; then
+if ((${#items[@]} == 0)); then
     keshiki --window-icon="$ICON" --center --error --text="No tenés wallpapers agregados para crear una lista."
-    rm -f "$list_tmp"
     exit 1
 fi
-
-select=$(keshiki --window-icon="$ICON" --center --list --checklist --width=839 --height=498 \
---text-align=center --title="Keshiki Playlist Manager" \
---button="Cancelar!gtk-cancel":1 --button="Aceptar!gtk-ok":0 \
---column="":CHK --column="Vista previa":IMG --column="Nombre":TXT \
---search-column=3 --separator="|" < "$list_tmp")
-
-if [ $? -eq 0 ]; then
-    # Filtrar solo los nombres seleccionados y guardarlos
-    echo "$select" | awk -F '|' '{for(i=3;i<=NF;i+=3) print $i}' > "$playlist_file"
+if select=$(keshiki --window-icon="$ICON" --center --list --checklist --width=839 --height=498 \
+    --text-align=center --title="Keshiki Playlist Manager" \
+    --button="Cancelar!gtk-cancel":1 --button="Aceptar!gtk-ok":0 \
+    --column="":CHK --column="Vista previa":IMG --column="Nombre":TXT \
+    --search-column=3 --separator="|" "${items[@]}"); then
+    tmp=$(mktemp "${DIRCONFIG}playlist.XXXXXXXX") || exit 1
+    trap 'rm -f -- "$tmp"' EXIT
+    printf '%s\n' "$select" | cut -d'|' -f3 >"$tmp" || exit 1
+    mv -f -- "$tmp" "$playlist_file" || exit 1
 fi
-
-rm -f "$list_tmp"
